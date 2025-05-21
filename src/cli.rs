@@ -1,6 +1,7 @@
 // src/cli.rs
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use crate::config::Argon2Params; // Added Argon2Params
 use crate::error::{AppError, AppResult, StoreError, CryptoError};
 use crate::models::PasswordStore;
 use crate::store;
@@ -37,7 +38,7 @@ pub enum Commands {
 
 /// Handles the parsed CLI command.
 /// Returns `Ok(true)` if the TUI should run, `Ok(false)` if a CLI command was handled and TUI should not run.
-pub fn handle_cli_command(cli: Cli) -> AppResult<bool> {
+pub fn handle_cli_command(cli: Cli, argon2_config: &Argon2Params) -> AppResult<bool> {
     log::debug!("Handling CLI command: {:?}", cli.command);
     match cli.command {
         Some(Commands::Init { file }) => {
@@ -84,7 +85,7 @@ pub fn handle_cli_command(cli: Cli) -> AppResult<bool> {
             }
             
             let store_instance = PasswordStore::default();
-            match store::save_store(&store_instance, &password, &file) {
+            match store::save_store(&store_instance, &password, &file, argon2_config) {
                 Ok(()) => {
                     println!("Successfully initialized and saved empty password store to {:?}.", file);
                     log::info!("Successfully initialized and saved empty password store to {:?}.", file);
@@ -117,7 +118,7 @@ pub fn handle_cli_command(cli: Cli) -> AppResult<bool> {
                     AppError::Cli(format!("Failed to read password: {}", e))
                 })?;
 
-            match store::load_store(&password, &file) {
+            match store::load_store(&password, &file, argon2_config) {
                 Ok(store_instance) => {
                     if store_instance.entries.is_empty() {
                         println!("No entries found in the password store.");
