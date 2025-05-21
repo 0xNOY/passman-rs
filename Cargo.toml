@@ -1,6 +1,23 @@
 [package]
 name = "passman-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021" # Corrected from 2024 to 2021, as 2024 is not a stable edition yet.
 
 [dependencies]
+ratatui = "0.26.1"
+chacha20poly1305 = "0.9.0" # Downgraded from 0.10.1
+argon2 = "0.3.3" # Downgraded from 0.4.0
+arboard = "3.3.0" # Downgraded from 3.4.0
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3.3"
+anyhow = "1.0.81"
+thiserror = "1.0.58"
+log = "0.4.21"
+env_logger = "0.11.3"
+rand = "0.8"
+hex = "0.4"
+crossterm = "0.27.0"
+uuid = { version = "1.8", features = ["v4", "serde"] } 
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.4", features = ["derive"] }
+rpassword = "7.3"
