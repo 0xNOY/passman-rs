@@ -1,7 +1,6 @@
 // src/crypto.rs
 use crate::error::{CryptoError, CryptoResult}; 
-use crate::config::Argon2Params; // Added Argon2Params import
-use log;
+use log; // Added log
 
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -15,12 +14,15 @@ use hex; // For converting hash to hex string
 use rand::rngs::OsRng; // For OsRng
 use rand::RngCore; // For fill_bytes method
 
-// OWASP recommended parameters for Argon2id are now in config.rs
+// OWASP recommended parameters for Argon2id
+const ARGON2_M_COST: u32 = 19456; // 19 MiB memory cost
+const ARGON2_T_COST: u32 = 2;    // 2 iterations
+const ARGON2_P_COST: u32 = 1;    // 1 degree of parallelism
 
 /// Hashes a master password using Argon2id.
 /// The salt should be unique per user/store.
 /// Returns the hashed password as a hex string.
-pub fn hash_master_password(password: &str, salt_bytes: &[u8], argon2_config: &Argon2Params) -> CryptoResult<String> {
+pub fn hash_master_password(password: &str, salt_bytes: &[u8]) -> CryptoResult<String> {
     let salt = SaltString::b64_encode(salt_bytes)
         .map_err(|e| { 
             let msg = format!("Salt encoding failed: {}", e); 
@@ -28,13 +30,13 @@ pub fn hash_master_password(password: &str, salt_bytes: &[u8], argon2_config: &A
             CryptoError::Argon2(msg) 
         })?;
 
-    let params = argon2::Params::new(argon2_config.m_cost, argon2_config.t_cost, argon2_config.p_cost, None)
+    let argon2_params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None)
         .map_err(|e| {
-            let msg = format!("Argon2 params error for hashing: {}", e);
+            let msg = format!("Argon2 params error: {}", e);
             log::error!("hash_master_password: {}", msg);
             CryptoError::Argon2(msg)
         })?;
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params);
 
     let password_hash = argon2
         .hash_password(password.as_bytes(), &salt)
@@ -64,16 +66,21 @@ pub fn verify_master_password(hashed_password_str: &str, password: &str) -> Cryp
     // However, to be consistent with hashing and key derivation, if specific settings were critical
     // for the library's behavior beyond what's in the hash, one might load them.
     // For password-hash crate compliance, default should be fine.
-    // For verification, Argon2 parameters are derived from the hash itself.
-    // We only need a default Argon2 instance.
-    let argon2 = Argon2::default(); 
+    // For clarity, let's construct it similarly to how it was done in hashing,
+    // though these specific params won't override what's in the hash for verification.
+    let argon2_params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None)
+        .map_err(|e| {
+            // This error is less likely to be hit in verification path if params are fixed,
+            // but kept for robustness if params were dynamic.
+            let msg = format!("Argon2 params error during verify setup: {}", e);
+            log::error!("verify_master_password: {}", msg);
+            CryptoError::Argon2(msg)
+        })?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params);
     
     match argon2.verify_password(password.as_bytes(), &parsed_hash) {
         Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => {
-            log::warn!("verify_master_password: Password verification failed (password mismatch).");
-            Ok(false) 
-        }
+        Err(argon2::password_hash::Error::Password) => Ok(false), 
         Err(e) => {
             let msg = format!("Verification failed: {}", e);
             log::error!("verify_master_password: {}", msg);
@@ -138,14 +145,14 @@ pub fn generate_chacha_nonce() -> CryptoResult<[u8; 12]> {
 }
 
 /// Derives a 32-byte key from a master password and salt using Argon2id.
-pub fn derive_key_from_master_password(master_password: &str, salt: &[u8], argon2_config: &Argon2Params) -> CryptoResult<[u8; 32]> {
-    let params = argon2::Params::new(argon2_config.m_cost, argon2_config.t_cost, argon2_config.p_cost, Some(32))
+pub fn derive_key_from_master_password(master_password: &str, salt: &[u8]) -> CryptoResult<[u8; 32]> {
+    let argon2_params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
         .map_err(|e| {
             let msg = format!("Argon2 params error for key derivation: {}", e);
             log::error!("derive_key_from_master_password: {}", msg);
             CryptoError::Argon2(msg)
         })?;
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params);
     
     let mut key_bytes = [0u8; 32];
     argon2.hash_password_into(master_password.as_bytes(), salt, &mut key_bytes)
@@ -162,20 +169,18 @@ pub fn derive_key_from_master_password(master_password: &str, salt: &[u8], argon
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Import Argon2Params for tests
-    use crate::config::Argon2Params as TestArgon2Params;
-
 
     #[test]
     fn test_hash_and_verify_master_password() {
         let password = "strongpassword123";
         let salt = generate_salt().expect("Failed to generate salt");
-        let argon2_params_default = TestArgon2Params::default();
 
-        let hashed_password = hash_master_password(password, &salt, &argon2_params_default).expect("Hashing failed");
+        let hashed_password = hash_master_password(password, &salt).expect("Hashing failed");
         
+        // Print for manual inspection if needed, but automated check is better
         println!("Salt (hex): {}", hex::encode(&salt));
-        
+        // println!("Hashed Password: {}", hashed_password);
+
         assert!(verify_master_password(&hashed_password, password).expect("Verification failed"));
         assert!(!verify_master_password(&hashed_password, "wrongpassword").expect("Verification should fail for wrong password"));
     }
@@ -212,30 +217,33 @@ mod tests {
     }
 
     #[test]
-    fn test_argon2_params_constants() { // Test now checks if default config params are valid
-        let argon2_params_default = TestArgon2Params::default();
-        let params = argon2::Params::new(argon2_params_default.m_cost, argon2_params_default.t_cost, argon2_params_default.p_cost, None);
-        assert!(params.is_ok(), "Default Argon2 params from config should be valid");
+    fn test_argon2_params_constants() {
+        // This test is more of a check that the constants are accessible
+        // and can be used to construct Params.
+        let params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None);
+        assert!(params.is_ok(), "Argon2 params should be valid with constants");
     }
 
     #[test]
     fn test_derive_key_from_master_password() {
         let password = "masterkey123";
         let salt = generate_salt().expect("Failed to generate salt for key derivation test");
-        let argon2_params_default = TestArgon2Params::default();
 
-        let key1 = derive_key_from_master_password(password, &salt, &argon2_params_default).expect("Key derivation failed");
+        let key1 = derive_key_from_master_password(password, &salt).expect("Key derivation failed");
         assert_eq!(key1.len(), 32);
 
-        let key2 = derive_key_from_master_password(password, &salt, &argon2_params_default).expect("Key derivation failed for second attempt");
+        // Test that the same password and salt produce the same key
+        let key2 = derive_key_from_master_password(password, &salt).expect("Key derivation failed for second attempt");
         assert_eq!(key1, key2);
 
+        // Test that a different salt produces a different key
         let salt2 = generate_salt().expect("Failed to generate different salt");
         assert_ne!(salt, salt2);
-        let key3 = derive_key_from_master_password(password, &salt2, &argon2_params_default).expect("Key derivation failed with different salt");
+        let key3 = derive_key_from_master_password(password, &salt2).expect("Key derivation failed with different salt");
         assert_ne!(key1, key3);
         
-        let key4 = derive_key_from_master_password("anotherpassword", &salt, &argon2_params_default).expect("Key derivation failed with different password");
+        // Test that a different password produces a different key
+        let key4 = derive_key_from_master_password("anotherpassword", &salt).expect("Key derivation failed with different password");
         assert_ne!(key1, key4);
     }
 }

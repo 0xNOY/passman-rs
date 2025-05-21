@@ -5,17 +5,12 @@ mod store;
 mod cli;
 mod error;
 mod models;
-mod generator; 
-mod config; // Added config module
 
-use clap::Parser; 
+use clap::Parser; // Added clap
 
 fn main() -> Result<(), error::AppError> {
-    env_logger::init(); 
+    env_logger::init(); // Initialize logger
     log::info!("Starting PassMan-RS application");
-
-    let config = config::load_config();
-    log::info!("Loaded configuration: {:?}", config);
 
     let cli_args = cli::Cli::parse();
 

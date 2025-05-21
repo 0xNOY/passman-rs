@@ -21,8 +21,3 @@ uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.4", features = ["derive"] }
 rpassword = "7.3"
-toml = "0.8.12"
-directories = "5.0"
-
-[dev-dependencies]
-tempfile = "3"
