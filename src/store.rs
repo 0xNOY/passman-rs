@@ -1,7 +1,8 @@
 // src/store.rs
 use crate::models::PasswordStore;
-use crate::error::{StoreError, StoreResult}; // CryptoError removed again
+use crate::error::{StoreError, StoreResult, CryptoError}; // Re-added CryptoError for specific mapping if needed by tests or direct use.
 use crate::crypto;
+use crate::config::Argon2Params; // Added Argon2Params import
 use log; // Added log
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -15,7 +16,7 @@ const NONCE_LEN: usize = 12; // For ChaCha20Poly1305 standard nonce
 ///
 /// The file format will be:
 /// [SALT (SALT_LEN bytes)] [NONCE (NONCE_LEN bytes)] [ENCRYPTED DATA (...)]
-pub fn save_store(store: &PasswordStore, master_password: &str, filepath: &Path) -> StoreResult<()> {
+pub fn save_store(store: &PasswordStore, master_password: &str, filepath: &Path, argon2_config: &Argon2Params) -> StoreResult<()> {
     log::info!("Attempting to save store to {:?}", filepath);
     // 1. Generate a new random salt
     let salt_bytes: Vec<u8> = crypto::generate_salt().map_err(|e| {
@@ -23,8 +24,8 @@ pub fn save_store(store: &PasswordStore, master_password: &str, filepath: &Path)
         StoreError::Crypto(e)
     })?;
 
-    // 2. Derive the encryption key using the generated salt
-    let key = crypto::derive_key_from_master_password(master_password, &salt_bytes)
+    // 2. Derive the encryption key using the generated salt and config
+    let key = crypto::derive_key_from_master_password(master_password, &salt_bytes, argon2_config)
         .map_err(|e| {
             log::error!("Failed to derive key for saving store: {:?}", e);
             StoreError::Crypto(e)
@@ -72,7 +73,7 @@ pub fn save_store(store: &PasswordStore, master_password: &str, filepath: &Path)
 }
 
 /// Loads the password store from a file, decrypting it with a key derived from the master password.
-pub fn load_store(master_password: &str, filepath: &Path) -> StoreResult<PasswordStore> {
+pub fn load_store(master_password: &str, filepath: &Path, argon2_config: &Argon2Params) -> StoreResult<PasswordStore> {
     log::info!("Attempting to load store from {:?}", filepath);
     // 1. Open and read the file
     let mut file = File::open(filepath).map_err(|e| {
@@ -109,7 +110,7 @@ pub fn load_store(master_password: &str, filepath: &Path) -> StoreResult<Passwor
     let encrypted_data = &file_contents[SALT_LEN + NONCE_LEN..];
     
     // 5. Derive the encryption key
-    let key = crypto::derive_key_from_master_password(master_password, salt)
+    let key = crypto::derive_key_from_master_password(master_password, salt, argon2_config)
         .map_err(|e| {
             log::error!("Failed to derive key for loading store: {:?}", e);
             StoreError::Crypto(e)
@@ -160,6 +161,7 @@ pub fn load_store(master_password: &str, filepath: &Path) -> StoreResult<Passwor
 mod tests {
     use super::*;
     use crate::models::{PasswordEntry, PasswordStore};
+    use crate::config::Argon2Params as TestArgon2Params; // For tests
     use std::fs;
     use tempfile::NamedTempFile;
 
@@ -192,13 +194,14 @@ mod tests {
         let filepath = temp_file.path();
         let master_password = "securepassword123";
         let original_store = create_test_store();
+        let argon2_params = TestArgon2Params::default();
 
         // Save the store
-        let save_result = save_store(&original_store, master_password, filepath);
+        let save_result = save_store(&original_store, master_password, filepath, &argon2_params);
         assert!(save_result.is_ok(), "Failed to save store: {:?}", save_result.err());
 
         // Load the store
-        let loaded_store_result = load_store(master_password, filepath);
+        let loaded_store_result = load_store(master_password, filepath, &argon2_params);
         assert!(loaded_store_result.is_ok(), "Failed to load store: {:?}", loaded_store_result.err());
         
         let loaded_store = loaded_store_result.unwrap();
@@ -216,19 +219,17 @@ mod tests {
         let master_password = "correctpassword";
         let wrong_password = "wrongpassword";
         let original_store = create_test_store();
+        let argon2_params = TestArgon2Params::default();
 
-        save_store(&original_store, master_password, filepath).expect("Failed to save store for wrong password test");
+        save_store(&original_store, master_password, filepath, &argon2_params).expect("Failed to save store for wrong password test");
 
-        let load_result = load_store(wrong_password, filepath);
+        let load_result = load_store(wrong_password, filepath, &argon2_params);
         assert!(load_result.is_err());
         match load_result.err().unwrap() {
-            StoreError::Crypto(CryptoError::ChaCha(_)) => { /* Expected error, ChaCha error indicates decryption failure */ },
-            StoreError::Crypto(CryptoError::Argon2(_)) => { /* Also possible if key derivation itself shows an error related to password */
-                // This specific error might not occur with Argon2 if the salt is correct but password is wrong,
-                // as key derivation will produce a 'valid' but incorrect key.
-                // The ChaCha error is more likely for wrong password.
-            },
-            other_error => panic!("Expected a CryptoError (ChaCha or Argon2) due to wrong password, but got {:?}", other_error),
+            StoreError::Crypto(crate::error::CryptoError::ChaCha(_)) => { /* Expected */ },
+            // Depending on argon2 version and exact error, this might also be Argon2 error.
+            // For this test setup, ChaCha is the more direct failure point from a wrong derived key.
+            other_error => panic!("Expected a CryptoError (ChaCha) due to wrong password, but got {:?}", other_error),
         }
     }
     
@@ -238,8 +239,9 @@ mod tests {
         let filepath = temp_file.path();
         let master_password = "securepassword";
         let original_store = create_test_store();
+        let argon2_params = TestArgon2Params::default();
 
-        save_store(&original_store, master_password, filepath).expect("Saving failed");
+        save_store(&original_store, master_password, filepath, &argon2_params).expect("Saving failed");
 
         // Tamper with the salt
         let mut contents = fs::read(filepath).expect("Reading file failed");
@@ -250,9 +252,9 @@ mod tests {
         
         let load_result = load_store(master_password, filepath);
         assert!(load_result.is_err());
-        // Expect a ChaCha error because the key will be wrong
+        // Expect a ChaCha error because the key derived from tampered salt will be wrong
         match load_result.err().unwrap() {
-            StoreError::Crypto(CryptoError::ChaCha(_)) => {},
+            StoreError::Crypto(crate::error::CryptoError::ChaCha(_)) => {},
             other => panic!("Expected ChaCha error due to tampered salt, got {:?}", other),
         }
     }
@@ -263,8 +265,9 @@ mod tests {
         let filepath = temp_file.path();
         let master_password = "securepassword";
         let original_store = create_test_store();
+        let argon2_params = TestArgon2Params::default();
 
-        save_store(&original_store, master_password, filepath).expect("Saving failed");
+        save_store(&original_store, master_password, filepath, &argon2_params).expect("Saving failed");
 
         // Tamper with the nonce
         let mut contents = fs::read(filepath).expect("Reading file failed");
@@ -301,8 +304,8 @@ mod tests {
         assert!(load_result.is_err());
         // Could be ChaCha error (decryption) or Deserialization error if decryption "succeeds" with garbage
         match load_result.err().unwrap() {
-            StoreError::Crypto(CryptoError::ChaCha(_)) => {},
-            StoreError::Deserialization(_) => {}, // Also possible
+            StoreError::Crypto(crate::error::CryptoError::ChaCha(_)) => {},
+            StoreError::Deserialization(_) => {}, 
             other => panic!("Expected ChaCha or Deserialization error due to tampered data, got {:?}", other),
         }
     }
@@ -312,12 +315,13 @@ mod tests {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let filepath = temp_file.path();
         let master_password = "emptypassword";
-        let original_store = PasswordStore::new(); // Empty store
+        let original_store = PasswordStore::new(); 
+        let argon2_params = TestArgon2Params::default();
 
-        let save_result = save_store(&original_store, master_password, filepath);
+        let save_result = save_store(&original_store, master_password, filepath, &argon2_params);
         assert!(save_result.is_ok(), "Failed to save empty store: {:?}", save_result.err());
 
-        let loaded_store_result = load_store(master_password, filepath);
+        let loaded_store_result = load_store(master_password, filepath, &argon2_params);
         assert!(loaded_store_result.is_ok(), "Failed to load empty store: {:?}", loaded_store_result.err());
         
         let loaded_store = loaded_store_result.unwrap();
@@ -328,7 +332,8 @@ mod tests {
     fn test_load_non_existent_file() {
         let filepath = Path::new("non_existent_store_file.dat");
         let master_password = "anypassword";
-        let load_result = load_store(master_password, filepath);
+        let argon2_params = TestArgon2Params::default();
+        let load_result = load_store(master_password, filepath, &argon2_params);
         assert!(load_result.is_err());
         match load_result.err().unwrap() {
             StoreError::Io(_) => { /* Expected */ },
@@ -341,9 +346,10 @@ mod tests {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let filepath = temp_file.path();
         fs::write(filepath, b"short").expect("Failed to write short file");
+        let argon2_params = TestArgon2Params::default();
 
         let master_password = "anypassword";
-        let load_result = load_store(master_password, filepath);
+        let load_result = load_store(master_password, filepath, &argon2_params);
         assert!(load_result.is_err());
         match load_result.err().unwrap() {
             StoreError::FormatError(msg) => assert!(msg.contains("too short")),
